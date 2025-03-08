@@ -117,16 +117,11 @@ local KnitServer = {}
 	pulled in via Wally instead of relying on Knit's Util folder, as this
 	folder only contains what is necessary for Knit to run in Wally mode.
 ]=]
-KnitServer.Util = (script.Parent :: Instance).Parent
+KnitServer.Util = script.Parent.Parent
 
 local SIGNAL_MARKER = newproxy(true)
 getmetatable(SIGNAL_MARKER).__tostring = function()
 	return "SIGNAL_MARKER"
-end
-
-local UNRELIABLE_SIGNAL_MARKER = newproxy(true)
-getmetatable(UNRELIABLE_SIGNAL_MARKER).__tostring = function()
-	return "UNRELIABLE_SIGNAL_MARKER"
 end
 
 local PROPERTY_MARKER = newproxy(true)
@@ -140,6 +135,7 @@ knitRepServiceFolder.Name = "Services"
 local Promise = require(KnitServer.Util.Promise)
 local Comm = require(KnitServer.Util.Comm)
 local ServerComm = Comm.ServerComm
+local LoadControllers = require(script.Parent.LoadControllers)
 
 local services: { [string]: Service } = {}
 local started = false
@@ -148,7 +144,6 @@ local onStartedComplete = Instance.new("BindableEvent")
 
 local function DoesServiceExist(serviceName: string): boolean
 	local service: Service? = services[serviceName]
-
 	return service ~= nil
 end
 
@@ -186,11 +181,8 @@ function KnitServer.CreateService(serviceDef: ServiceDef): Service
 	assert(type(serviceDef.Name) == "string", `Service.Name must be a string; got {type(serviceDef.Name)}`)
 	assert(#serviceDef.Name > 0, "Service.Name must be a non-empty string")
 	assert(not DoesServiceExist(serviceDef.Name), `Service "{serviceDef.Name}" already exists`)
-	assert(not started, `Services cannot be created after calling "Knit.Start()"`)
-
 	local service = serviceDef
 	service.KnitComm = ServerComm.new(knitRepServiceFolder, serviceDef.Name)
-
 	if type(service.Client) ~= "table" then
 		service.Client = { Server = service }
 	else
@@ -198,9 +190,7 @@ function KnitServer.CreateService(serviceDef: ServiceDef): Service
 			service.Client.Server = service
 		end
 	end
-
 	services[service.Name] = service
-
 	return service
 end
 
@@ -212,17 +202,13 @@ end
 	```
 ]=]
 function KnitServer.AddServices(parent: Instance): { Service }
-	assert(not started, `Services cannot be added after calling "Knit.Start()"`)
-
 	local addedServices = {}
 	for _, v in parent:GetChildren() do
 		if not v:IsA("ModuleScript") then
 			continue
 		end
-
 		table.insert(addedServices, require(v))
 	end
-
 	return addedServices
 end
 
@@ -230,17 +216,13 @@ end
 	Requires all the modules that are descendants of the given parent.
 ]=]
 function KnitServer.AddServicesDeep(parent: Instance): { Service }
-	assert(not started, `Services cannot be added after calling "Knit.Start()"`)
-
 	local addedServices = {}
 	for _, v in parent:GetDescendants() do
 		if not v:IsA("ModuleScript") then
 			continue
 		end
-
 		table.insert(addedServices, require(v))
 	end
-
 	return addedServices
 end
 
@@ -250,17 +232,7 @@ end
 function KnitServer.GetService(serviceName: string): Service
 	assert(started, "Cannot call GetService until Knit has been started")
 	assert(type(serviceName) == "string", `ServiceName must be a string; got {type(serviceName)}`)
-
 	return assert(services[serviceName], `Could not find service "{serviceName}"`) :: Service
-end
-
---[=[
-	Gets a table of all services.
-]=]
-function KnitServer.GetServices(): { [string]: Service }
-	assert(started, "Cannot call GetServices until Knit has been started")
-
-	return services
 end
 
 --[=[
@@ -289,29 +261,6 @@ end
 ]=]
 function KnitServer.CreateSignal()
 	return SIGNAL_MARKER
-end
-
---[=[
-	@return UNRELIABLE_SIGNAL_MARKER
-
-	Returns a marker that will transform the current key into
-	an unreliable RemoteSignal once the service is created. Should
-	only be called within the Client table of a service.
-
-	See [RemoteSignal](https://sleitnick.github.io/RbxUtil/api/RemoteSignal)
-	documentation for more info.
-
-	:::info Unreliable Events
-	Internally, this uses UnreliableRemoteEvents, which allows for
-	network communication that is unreliable and unordered. This is
-	useful for events that are not crucial for gameplay, since the
-	delivery of the events may occur out of order or not at all.
-
-	See  the documentation for [UnreliableRemoteEvents](https://create.roblox.com/docs/reference/engine/classes/UnreliableRemoteEvent)
-	for more info.
-]=]
-function KnitServer.CreateUnreliableSignal()
-	return UNRELIABLE_SIGNAL_MARKER
 end
 
 --[=[
@@ -364,7 +313,7 @@ end
 		print("Knit started!")
 	end):catch(warn)
 	```
-	
+
 	Example of Knit started with options:
 	```lua
 	Knit.Start({
@@ -383,12 +332,11 @@ end
 ]=]
 function KnitServer.Start(options: KnitOptions?)
 	if started then
-		return Promise.reject("Knit already started")
+		warn("[ Knit ]: Knit has already been started")
+		return
 	end
 
 	started = true
-
-	table.freeze(services)
 
 	if options == nil then
 		selectedOptions = defaultOptions
@@ -402,67 +350,36 @@ function KnitServer.Start(options: KnitOptions?)
 		end
 	end
 
-	return Promise.new(function(resolve)
-		local knitMiddleware = if selectedOptions.Middleware ~= nil then selectedOptions.Middleware else {}
+	local knitMiddleware = if selectedOptions.Middleware ~= nil then selectedOptions.Middleware else {}
 
-		-- Bind remotes:
-		for _, service in services do
-			local middleware = if service.Middleware ~= nil then service.Middleware else {}
-			local inbound = if middleware.Inbound ~= nil then middleware.Inbound else knitMiddleware.Inbound
-			local outbound = if middleware.Outbound ~= nil then middleware.Outbound else knitMiddleware.Outbound
-
-			service.Middleware = nil
-
-			for k, v in service.Client do
-				if type(v) == "function" then
-					service.KnitComm:WrapMethod(service.Client, k, inbound, outbound)
-				elseif v == SIGNAL_MARKER then
-					service.Client[k] = service.KnitComm:CreateSignal(k, false, inbound, outbound)
-				elseif v == UNRELIABLE_SIGNAL_MARKER then
-					service.Client[k] = service.KnitComm:CreateSignal(k, true, inbound, outbound)
-				elseif type(v) == "table" and v[1] == PROPERTY_MARKER then
-					service.Client[k] = service.KnitComm:CreateProperty(k, v[2], inbound, outbound)
-				end
+	-- Bind remotes:
+	for _, service in services do
+		local middleware = if service.Middleware ~= nil then service.Middleware else {}
+		local inbound = if middleware.Inbound ~= nil then middleware.Inbound else knitMiddleware.Inbound
+		local outbound = if middleware.Outbound ~= nil then middleware.Outbound else knitMiddleware.Outbound
+		service.Middleware = nil
+		for k, v in service.Client do
+			if type(v) == "function" then
+				service.KnitComm:WrapMethod(service.Client, k, inbound, outbound)
+			elseif v == SIGNAL_MARKER then
+				service.Client[k] = service.KnitComm:CreateSignal(k, inbound, outbound)
+			elseif type(v) == "table" and v[1] == PROPERTY_MARKER then
+				service.Client[k] = service.KnitComm:CreateProperty(k, v[2], inbound, outbound)
 			end
 		end
+	end
 
-		-- Init:
-		local promisesInitServices = {}
-		for _, service in services do
-			if type(service.KnitInit) == "function" then
-				table.insert(
-					promisesInitServices,
-					Promise.new(function(r)
-						debug.setmemorycategory(service.Name)
-						service:KnitInit()
-						r()
-					end)
-				)
-			end
-		end
+	LoadControllers(services)
 
-		resolve(Promise.all(promisesInitServices))
-	end):andThen(function()
-		-- Start:
-		for _, service in services do
-			if type(service.KnitStart) == "function" then
-				task.spawn(function()
-					debug.setmemorycategory(service.Name)
-					service:KnitStart()
-				end)
-			end
-		end
+	startedComplete = true
+	onStartedComplete:Fire()
 
-		startedComplete = true
-		onStartedComplete:Fire()
-
-		task.defer(function()
-			onStartedComplete:Destroy()
-		end)
-
-		-- Expose service remotes to everyone:
-		knitRepServiceFolder.Parent = script.Parent
+	task.defer(function()
+		onStartedComplete:Destroy()
 	end)
+
+	-- Expose service remotes to everyone:
+	knitRepServiceFolder.Parent = script.Parent
 end
 
 --[=[
